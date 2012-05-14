@@ -53,6 +53,9 @@ Versions:
 #include <stdlib.h>
 #include <time.h>
 #include <fcntl.h>
+#include <errno.h>
+#include "posix_io.h"
+#include "plfs_io.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -91,7 +94,7 @@ extern int cli_set_location();
 extern int cli_set_subdirs();
 extern int cli_set_read();
 extern int cli_set_write();
-extern int cli_set_buffering();
+extern int cli_set_iointerface();
 extern int cli_set_bias_read();
 extern int cli_set_bias_create();
 extern int cli_set_report();
@@ -110,7 +113,7 @@ cmd command_list[]={ /* table of CLI commands */
    {"set subdirectories",cli_set_subdirs,"Sets number of subdirectories"},
    {"set read",cli_set_read,"Sets read block size"},
    {"set write",cli_set_write,"Sets write block size"},
-   {"set buffering",cli_set_buffering,"Sets usage of buffered I/O"},
+   {"set iointerface",cli_set_iointerface,"Sets usage of I/O interface"},
    {"set bias read",cli_set_bias_read,
       "Sets the chance of choosing read over append"},
    {"set bias create",cli_set_bias_create,
@@ -146,7 +149,7 @@ int read_block_size=512;        /* I/O block sizes */
 int write_block_size=512;
 int bias_read=5;                /* chance of picking read over append */
 int bias_create=5;              /* chance of picking create over delete */
-int buffered_io=1;              /* use C library buffered I/O */
+int io_interface=0;             /* use C library buffered I/O */
 int report=0;                   /* 0=verbose, 1=terse report format */
 
 /* Working Storage */
@@ -175,6 +178,41 @@ char *read_buffer; /* temporary space for reading file data into */
 #define RND(x) ((x>0)?(genrand() % (x)):0)
 extern unsigned long genrand();
 extern void sgenrand();
+
+enum IO_Interface {
+    IO_INTERF_LIBC = 0,
+    IO_INTERF_POSIX,
+    IO_INTERF_PLFS,
+    IO_INTERF_MPI,
+    IO_INTERF_COUNT, /* place holder for the count of IO interface. */
+};
+
+typedef int (*file_open_t)(void **fd, const char *filename, int flags);
+typedef int (*file_read_t)(void *fd, void *buf, off_t offset, size_t len);
+typedef int (*file_write_t)(void *fd, void *buf, off_t offset, size_t len);
+typedef int (*file_close_t)(void **fd);
+typedef int (*file_remove_t)(const char *filename);
+
+struct IO_Callback {
+    file_open_t open;
+    file_read_t read;
+    file_write_t write;
+    file_close_t close;
+    file_remove_t remove;
+};
+
+#define INITIALIZE_IO_INTERFACE_CALLBACKS(name)   \
+    [IO_INTERF_##name].open = name##_open,        \
+        [IO_INTERF_##name].read = name##_read,    \
+        [IO_INTERF_##name].write = name##_write,  \
+        [IO_INTERF_##name].close = name##_close,  \
+        [IO_INTERF_##name].remove = name##_remove,
+
+struct IO_Callback io_callbacks[IO_INTERF_COUNT] = {
+    /*    INITIALIZE_IO_INTERFACE_CALLBACKS(LIBC) */
+    INITIALIZE_IO_INTERFACE_CALLBACKS(POSIX)
+    INITIALIZE_IO_INTERFACE_CALLBACKS(PLFS)
+};
 
 /* converts integer values to byte/kilobyte/megabyte strings */
 char *scale(i)
@@ -444,17 +482,27 @@ char *param; /* remainder of command line */
    return(1);
 }
 
-/* UI callback for 'set buffering' - sets buffering mode on or off
-   - true = buffered I/O (default), false = raw I/O */
-int cli_set_buffering(param)
+/* UI callback for 'set iointerface' - sets io interface to use
+   - libc = fopen, fread and fwrite (default)
+   - posix = open, read and write
+   - plfs = plfs_open, plfs_read and plfs_write
+   - mpi = MPI File IO functions
+*/
+#define CHECK_FOR_INTERFACE(def)          \
+    if (!strcmp(param, #def)) {           \
+        io_interface = IO_INTERF_##def;   \
+        return 1;                         \
+    }
+int cli_set_iointerface(param)
 char *param; /* remainder of command line */
 {
-   if (param && (!strcmp(param,"true") || !strcmp(param,"false")))
-      buffered_io=(!strcmp(param,"true"))?1:0;
-   else
-      fprintf(stderr,"Error: no buffering mode (true/false) specified\n");
-      
-   return(1);
+    if (param) {
+        CHECK_FOR_INTERFACE(LIBC);
+        CHECK_FOR_INTERFACE(POSIX);
+        CHECK_FOR_INTERFACE(PLFS);
+    }
+    fprintf(stderr,"Error: no io interface (LIBC, POSIX...) specified\n");
+    return(1);
 }
 
 /* UI callback for 'set bias read' - sets probability of read vs. append */
@@ -627,39 +675,19 @@ int find_free_file()
 }
 
 /* write 'size' bytes to file 'fd' using unbuffered I/O */
-void write_blocks(fd,size)
-int fd;
-int size;   /* bytes to write to file */
-{
-   int offset=0; /* offset into file */
-   int i;
+int write_blocks(void *fd, off_t foffset, size_t len) {
+    int offset=0; /* offset into file */
+    int i;
 
-   /* write even blocks */
-   for (i=size; i>=write_block_size;
-      i-=write_block_size,offset+=write_block_size)
-      write(fd,file_source+offset,write_block_size);
+    /* write even blocks */
+    for (i=len; i>=write_block_size;
+         i-=write_block_size,offset+=write_block_size)
+        io_callbacks[io_interface].write(fd, file_source+offset,
+                                         foffset+offset, write_block_size);
 
-   write(fd,file_source+offset,i); /* write remainder */
-
-   bytes_written+=size; /* update counter */
-}
-
-/* write 'size' bytes to file 'fp' using buffered I/O */
-void fwrite_blocks(fp,size)
-FILE *fp;
-int size;   /* bytes to write to file */
-{
-   int offset=0; /* offset into file */
-   int i;
-
-   /* write even blocks */
-   for (i=size; i>=write_block_size;
-      i-=write_block_size,offset+=write_block_size)
-      fwrite(file_source+offset,write_block_size,1,fp);
-
-   fwrite(file_source+offset,i,1,fp); /* write remainder */
-   
-   bytes_written+=size; /* update counter */
+    io_callbacks[io_interface].write(fd, file_source+offset,
+                                     foffset+offset, i); /* write remainder */
+    bytes_written+=len; /* update counter */
 }
 
 void create_file_name(dest)
@@ -686,12 +714,11 @@ char *dest;
 }
 
 /* creates new file of specified length and fills it with data */
-void create_file(buffered)
-int buffered; /* 1=buffered I/O (default), 0=unbuffered I/O */
+void create_file(unused)
+int unused;
 {
-   FILE *fp=NULL;
-   int fd=-1;
-   int free_file; /* file_table slot for new file */
+    void *fd = NULL;
+    int free_file; /* file_table slot for new file */
 
    if ((free_file=find_free_file())!=-1) /* if file space is available */
       { /* decide on name and initial length */
@@ -700,27 +727,15 @@ int buffered; /* 1=buffered I/O (default), 0=unbuffered I/O */
       file_table[free_file].size=
          file_size_low+RND(file_size_high-file_size_low);
 
-      if (buffered)
-         fp=fopen(file_table[free_file].name,"w");
-      else
-         fd=open(file_table[free_file].name,O_RDWR|O_CREAT,0644);
-
-      if (fp || fd!=-1)
-         {
-         if (buffered)
-            {
-            fwrite_blocks(fp,file_table[free_file].size);
-            fclose(fp);
-            }
-         else
-            {
-            write_blocks(fd,file_table[free_file].size);
-            close(fd);
-            }
-         }
-      else
-         fprintf(stderr,"Error: cannot open '%s' for writing\n",
-            file_table[free_file].name);
+      io_callbacks[io_interface].open(&fd,file_table[free_file].name,
+                                      O_WRONLY | O_CREAT);
+      if (fd) {
+          write_blocks(fd, 0, file_table[free_file].size);
+          io_callbacks[io_interface].close(&fd);
+      } else {
+          fprintf(stderr,"Error: cannot open '%s' for writing\n",
+                  file_table[free_file].name);
+      }
       }
 }
 
@@ -730,7 +745,7 @@ int number;
 {
    if (file_table[number].size)
       {
-      if (remove(file_table[number].name))
+      if (io_callbacks[io_interface].remove(file_table[number].name))
          fprintf(stderr,"Error: Cannot delete '%s'\n",file_table[number].name);
       else
          { /* reset entry in file_table and update counter */
@@ -741,87 +756,55 @@ int number;
 }
 
 /* reads entire specified file into temporary buffer */
-void read_file(number,buffered)
+void read_file(number,unused)
 int number;   /* number of file to read (from file_table) */
-int buffered; /* 1=buffered I/O (default), 0=unbuffered I/O */
+int unused;
 {
-   FILE *fp=NULL;
-   int fd=-1;
-   int i;
+    void *fd = NULL;
+    int i;
 
-   if (buffered)
-      fp=fopen(file_table[number].name,"r");
-   else
-      fd=open(file_table[number].name,O_RDONLY,0644);
+    io_callbacks[io_interface].open(&fd, file_table[number].name,O_RDONLY);
+    if (fd) { /* read as many blocks as possible then read the remainder */
+        off_t offset = 0;
+        for (i=file_table[number].size; i>=read_block_size;
+             i-=read_block_size, offset+=read_block_size)
+            io_callbacks[io_interface].read(fd, read_buffer,
+                                            offset, read_block_size);
 
-   if (fp || fd!=-1)
-      { /* read as many blocks as possible then read the remainder */
-      if (buffered)
-         {
-         for (i=file_table[number].size; i>=read_block_size; i-=read_block_size)
-            fread(read_buffer,read_block_size,1,fp);
-
-         fread(read_buffer,i,1,fp);
-
-         fclose(fp);
-         }
-      else
-         {
-         for (i=file_table[number].size; i>=read_block_size; i-=read_block_size)
-            read(fd,read_buffer,read_block_size);
-
-         read(fd,read_buffer,i);
-
-         close(fd);
-         }
-
-      /* increment counters to record transaction */
-      bytes_read+=file_table[number].size;
-      files_read++;
-      }
-   else
-      fprintf(stderr,"Error: cannot open '%s' for reading\n",
-         file_table[number].name);
+        io_callbacks[io_interface].read(fd,read_buffer,offset, i);
+        io_callbacks[io_interface].close(&fd);
+        /* increment counters to record transaction */
+        bytes_read+=file_table[number].size;
+        files_read++;
+    } else
+        fprintf(stderr,"Error: cannot open '%s' for reading\n",
+                file_table[number].name);
 }
 
 /* appends random data to a chosen file up to the maximum configured length */
-void append_file(number,buffered)
+void append_file(number,unused)
 int number;   /* number of file (from file_table) to append date to */
-int buffered; /* 1=buffered I/O (default), 0=unbuffered I/O */
+int unused;
 {
-   FILE *fp=NULL;
-   int fd=-1;
-   int block; /* size of data to append */
+    void *fd = NULL;
+    int block; /* size of data to append */
 
-   if (file_table[number].size<file_size_high)
-      {
-      if (buffered)
-         fp=fopen(file_table[number].name,"a");
-      else
-         fd=open(file_table[number].name,O_RDWR|O_APPEND,0644);
+   if (file_table[number].size<file_size_high) {
+       io_callbacks[io_interface].open(&fd, file_table[number].name,
+                                       O_WRONLY|O_APPEND);
 
-      if ((fp || fd!=-1) && file_table[number].size<file_size_high)
-         {
-         block=RND(file_size_high-file_table[number].size)+1;
+       if ((fd) && file_table[number].size<file_size_high) {
+           block=RND(file_size_high-file_table[number].size)+1;
 
-         if (buffered)
-            {
-            fwrite_blocks(fp,block);
-            fclose(fp);
-            }
-         else
-            {
-            write_blocks(fd,block);
-            close(fd);
-            }
-
-         file_table[number].size+=block;
-         files_appended++;
-         }
-      else
+           write_blocks(fd, file_table[number].size, block);
+           io_callbacks[io_interface].close(&fd);
+           file_table[number].size+=block;
+           files_appended++;
+       }
+       else
          fprintf(stderr,"Error: cannot open '%s' for append\n",
             file_table[number].name);
-      }
+   }
 }
 
 /* finds and returns the offset of a file that is in use from the file_table */
@@ -1013,13 +996,13 @@ char *param; /* unused */
    printf("Creating files...");
    fflush(stdout);
    for (i=0; i<simultaneous; i++)
-      create_file(buffered_io);
+      create_file(0);
    printf("Done\n");
   
    printf("Performing transactions");
    fflush(stdout);
    time(&t_start_time);
-   incomplete=run_transactions(buffered_io);
+   incomplete=run_transactions(0);
    time(&t_end_time);
    if (!incomplete)
       printf("Done\n");
@@ -1113,7 +1096,17 @@ char *param; /* optional: name of output file */
    fprintf(fp,"write=%s\n",scale(write_block_size));
    fprintf(fp,"Biases are: read/append=%d, create/delete=%d\n",bias_read,
       bias_create);
-   fprintf(fp,"%ssing Unix buffered file I/O\n",buffered_io?"U":"Not u");
+   switch (io_interface) {
+   case IO_INTERF_LIBC:
+       fprintf(fp,"Using Unix buffered file I/O\n");
+       break;
+   case IO_INTERF_POSIX:
+       fprintf(fp,"Using POSIX file I/O\n");
+       break;
+   case IO_INTERF_PLFS:
+       fprintf(fp,"Using libplfs file I/O\n");
+       break;
+   }
    fprintf(fp,"Random number generator seed is %d\n",seed);
 
    fprintf(fp,"Report format is %s.\n",report?"terse":"verbose");
