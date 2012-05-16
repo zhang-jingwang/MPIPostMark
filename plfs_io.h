@@ -1,6 +1,8 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <plfs.h>
 
@@ -13,11 +15,14 @@ int PLFS_read(void *fd, void *buf, off_t offset, size_t len) {
 }
 
 int PLFS_write(void *fd, void *buf, off_t offset, size_t len) {
-    return plfs_write(fd, buf, len, offset, getpid());
+    pid_t pid = getpid();
+    return plfs_write(fd, buf, len, offset, pid);
 }
 
 int PLFS_close(void **fd) {
-    plfs_sync((Plfs_fd *)*fd);
+    int ret;
+    //    ret = plfs_sync((Plfs_fd *)*fd);
+    //    if (ret) printf("Sync error! %s.", strerror(errno));
     plfs_close((Plfs_fd *)*fd, getpid(), 0, O_CREAT | O_RDWR, NULL);
     *fd = NULL;
     return 0;

@@ -98,6 +98,7 @@ extern int cli_set_iointerface();
 extern int cli_set_bias_read();
 extern int cli_set_bias_create();
 extern int cli_set_report();
+extern int cli_set_partition();
 
 extern int cli_run();
 extern int cli_show();
@@ -119,6 +120,8 @@ cmd command_list[]={ /* table of CLI commands */
    {"set bias create",cli_set_bias_create,
       "Sets the chance of choosing create over delete"},
    {"set report",cli_set_report,"Choose verbose or terse report format"},
+   {"set partition",cli_set_partition,
+    "Choose partition methods: subdir or prefix"},
    {"run",cli_run,"Runs one iteration of benchmark"},
    {"show",cli_show,"Displays current configuration"},
    {"help",cli_help,"Prints out available commands"},
@@ -152,6 +155,7 @@ int bias_read=5;                /* chance of picking read over append */
 int bias_create=5;              /* chance of picking create over delete */
 int io_interface=0;             /* use C library buffered I/O */
 int report=0;                   /* 0=verbose, 1=terse report format */
+int partition_method=0;         /* 0=subdir, 1=prefix */
 
 /* Working Storage */
 char *file_source; /* pointer to buffer of random text */
@@ -294,6 +298,25 @@ char *param; /* remainder of command line */
    return(1);
 }
 
+/* UI callback for 'set partition' command - sets partition method */
+int cli_set_partition(param)
+char *param; /* remainder of command line */
+{
+    int match = 0;
+    if (param) { 
+        if (!strcmp(param,"subdir"))
+            partition_method = 0;
+        else if (!strcmp(param,"prefix"))
+            partition_method = 1;
+        else
+            match=-1;
+    }
+    if (!param || match==-1)
+        fprintf(stderr,"Error: either 'subdir' or 'prefix' required\n");
+
+    return(1);
+}
+
 /* UI callback for 'set seed' command - initial value for random number gen */
 int cli_set_seed(param)
 char *param; /* remainder of command line */
@@ -349,10 +372,14 @@ int weight;
 
    if (new_file_system=(file_system *)calloc(1,sizeof(file_system)))
       {
-      char buf[255];
-      sprintf(buf, "%s%sRank-%d", params, SEPARATOR, thread_id);
-      io_callbacks[io_interface].mkdir(buf);
-      strcpy(new_file_system->system.name,buf);
+      if (partition_method == 0) {
+          char buf[255];
+          sprintf(buf, "%s%sRank-%d", params, SEPARATOR, thread_id);
+          io_callbacks[io_interface].mkdir(buf);
+          strcpy(new_file_system->system.name,buf);
+      } else {
+          strcpy(new_file_system->system.name, params);
+      }
       new_file_system->system.size=weight;
 
       if (file_systems)
@@ -380,7 +407,8 @@ char *loc_name;
    for (traverse=file_systems; traverse; traverse=traverse->next)
       if (!strcmp(traverse->system.name,loc_name))
          {
-         io_callbacks[io_interface].rmdir(loc_name);
+         if (partition_method == 0)
+             io_callbacks[io_interface].rmdir(loc_name);
          file_system_weight-=traverse->system.size;
          file_system_count--;
 
@@ -418,7 +446,8 @@ void delete_locations()
 
    while (file_systems)
       {
-      io_callbacks[io_interface].rmdir(file_systems->system.name);
+      if (partition_method == 0)
+          io_callbacks[io_interface].rmdir(file_systems->system.name);
       next=file_systems->next;
       free(file_systems);
       file_systems=next;
@@ -903,9 +932,9 @@ int write_blocks(void *fd, off_t foffset, size_t len) {
          i-=write_block_size,offset+=write_block_size)
         io_callbacks[io_interface].write(fd, file_source+offset,
                                          foffset+offset, write_block_size);
-
-    io_callbacks[io_interface].write(fd, file_source+offset,
-                                     foffset+offset, i); /* write remainder */
+    if (i > 0)
+        io_callbacks[io_interface].write(fd, file_source+offset,
+                                         foffset+offset, i);
     bytes_written+=len; /* update counter */
 }
 
@@ -927,8 +956,10 @@ char *dest;
       sprintf(conversion,"s%d%s",RND(subdirectories),SEPARATOR);
       strcat(dest,conversion);
       }
-
-   sprintf(conversion,"%d",++files_created);
+   if (partition_method == 1)
+       sprintf(conversion,"r%d-%d", thread_id, ++files_created);
+   else
+       sprintf(conversion,"%d",++files_created);
    strcat(dest,conversion);
 }
 
