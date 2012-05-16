@@ -39,3 +39,11 @@ int POSIX_remove(const char *filename) {
     if (ret) {fprintf(stderr, "Error delete file:%s.", strerror(errno));}
     return ret;
 }
+
+int POSIX_mkdir(const char *dirname) {
+    return mkdir(dirname, 0700);
+}
+
+int POSIX_rmdir(const char *dirname) {
+    return rmdir(dirname);
+}

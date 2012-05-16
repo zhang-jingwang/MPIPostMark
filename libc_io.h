@@ -56,3 +56,11 @@ int LIBC_remove(const char *filename) {
     if (ret) {fprintf(stderr, "Error delete file:%s.", strerror(errno));}
     return ret;
 }
+
+int LIBC_mkdir(const char *dirname) {
+    return mkdir(dirname, 0700);
+}
+
+int LIBC_rmdir(const char *dirname) {
+    return rmdir(dirname);
+}

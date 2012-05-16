@@ -55,6 +55,7 @@ Versions:
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <mpi.h>
 #include "posix_io.h"
 #include "plfs_io.h"
 #include "libc_io.h"
@@ -64,12 +65,10 @@ Versions:
 #include <direct.h>
 
 #define GETWD(x) getcwd(x,MAX_LINE)
-#define MKDIR(x) mkdir(x)
 #define SEPARATOR "\\"
 #else
 
 #define GETWD(x) getcwd(x, MAX_LINE)
-#define MKDIR(x) mkdir(x,0700)
 #define SEPARATOR "/"
 #endif
 
@@ -129,7 +128,8 @@ cmd command_list[]={ /* table of CLI commands */
 
 extern void verbose_report();
 extern void terse_report();
-void (*reports[])()={verbose_report,terse_report};
+extern void cluster_report();
+void (*reports[])()={verbose_report,terse_report,cluster_report};
 
 /* Counters */
 int files_created;  /* number of files created */
@@ -176,6 +176,9 @@ char **location_index;     /* weighted index of file systems */
 
 char *read_buffer; /* temporary space for reading file data into */
 
+/* MPI related variables */
+int thread_id, threadcount;
+
 #define RND(x) ((x>0)?(genrand() % (x)):0)
 extern unsigned long genrand();
 extern void sgenrand();
@@ -193,6 +196,8 @@ typedef int (*file_read_t)(void *fd, void *buf, off_t offset, size_t len);
 typedef int (*file_write_t)(void *fd, void *buf, off_t offset, size_t len);
 typedef int (*file_close_t)(void **fd);
 typedef int (*file_remove_t)(const char *filename);
+typedef int (*mkdir_t)(const char *dirname);
+typedef int (*rmdir_t)(const char *dirname);
 
 struct IO_Callback {
     file_open_t open;
@@ -200,6 +205,8 @@ struct IO_Callback {
     file_write_t write;
     file_close_t close;
     file_remove_t remove;
+    mkdir_t mkdir;
+    rmdir_t rmdir;
 };
 
 #define INITIALIZE_IO_INTERFACE_CALLBACKS(name)   \
@@ -207,7 +214,9 @@ struct IO_Callback {
         [IO_INTERF_##name].read = name##_read,    \
         [IO_INTERF_##name].write = name##_write,  \
         [IO_INTERF_##name].close = name##_close,  \
-        [IO_INTERF_##name].remove = name##_remove,
+        [IO_INTERF_##name].remove = name##_remove,\
+        [IO_INTERF_##name].mkdir = name##_mkdir,  \
+        [IO_INTERF_##name].rmdir = name##_rmdir,
 
 struct IO_Callback io_callbacks[IO_INTERF_COUNT] = {
     INITIALIZE_IO_INTERFACE_CALLBACKS(LIBC)
@@ -340,7 +349,10 @@ int weight;
 
    if (new_file_system=(file_system *)calloc(1,sizeof(file_system)))
       {
-      strcpy(new_file_system->system.name,params);
+      char buf[255];
+      sprintf(buf, "%s%sRank-%d", params, SEPARATOR, thread_id);
+      io_callbacks[io_interface].mkdir(buf);
+      strcpy(new_file_system->system.name,buf);
       new_file_system->system.size=weight;
 
       if (file_systems)
@@ -368,6 +380,7 @@ char *loc_name;
    for (traverse=file_systems; traverse; traverse=traverse->next)
       if (!strcmp(traverse->system.name,loc_name))
          {
+         io_callbacks[io_interface].rmdir(loc_name);
          file_system_weight-=traverse->system.size;
          file_system_count--;
 
@@ -405,6 +418,7 @@ void delete_locations()
 
    while (file_systems)
       {
+      io_callbacks[io_interface].rmdir(file_systems->system.name);
       next=file_systems->next;
       free(file_systems);
       file_systems=next;
@@ -545,12 +559,13 @@ char *param; /* remainder of command line */
    if (param)
       { 
       if (!strcmp(param,"verbose"))
-         report=0;
+          report=0;
+      else if (!strcmp(param,"terse"))
+          report=1;
+      else if (!strcmp(param,"cluster"))
+          report=2;
       else
-         if (!strcmp(param,"terse"))
-            report=1;
-         else
-            match=-1;
+          match=-1;
       }
 
    if (!param || match==-1)
@@ -585,7 +600,208 @@ time_t t0;
 }
 
 /* prints out results from running transactions */
-void verbose_report(fp,end_time,start_time,t_end_time,t_start_time,deleted)
+void cluster_report(fp,end_time,start_time,t_end_time,t_start_time,
+                    b1_end_time,b1_start_time,b2_end_time,b2_start_time,
+                    deleted)
+FILE *fp;
+time_t end_time,start_time,t_end_time,t_start_time; /* timers from run */
+time_t b1_end_time,b1_start_time, b2_end_time,b2_start_time; /* timers from barriers */
+int deleted; /* files deleted back-to-back */
+{
+   /* time_t should be equivalent to 'long' */
+   
+   time_t elapsed,t_elapsed;
+   time_t elapsed_sum, t_elapsed_sum;
+   time_t elapsed_min, t_elapsed_min;
+   time_t elapsed_max, t_elapsed_max;
+   int interval_start;
+   int interval_sum, interval_min, interval_max;
+   int fc_sum, fc_min, fc_max;
+   float fcps, fcps_sum, fcps_max, fcps_min;
+   float fcpsmt, fcpsmt_sum, fcpsmt_max, fcpsmt_min;
+   int fr_sum, fr_min, fr_max;
+   float frps, frps_sum, frps_min, frps_max;
+   int fa_sum, fa_min, fa_max;
+   float faps, faps_sum, faps_min, faps_max;
+   int fd_sum, fd_min, fd_max;
+   float fdps, fdps_sum, fdps_min, fdps_max;
+   int interval_end;
+   int fda, fda_sum, fda_min, fda_max;
+   float fdaps, fdaps_sum, fdaps_min, fdaps_max;
+   int fdamt, fdamt_sum, fdamt_min, fdamt_max;
+   float fdapsmt, fdapsmt_sum, fdapsmt_min, fdapsmt_max;
+   float br_sum, br_min, br_max;
+   float brps, brps_sum, brps_min, brps_max;
+   float bw_sum, bw_min, bw_max;
+   float bwps, bwps_sum, bwps_min, bwps_max;      
+
+   elapsed=diff_time(end_time,start_time)-diff_time(b1_end_time,b1_start_time)-diff_time(b2_end_time,b2_start_time);
+   if (elapsed < 1) elapsed = 1;
+   t_elapsed=diff_time(t_end_time,t_start_time);
+   interval_start = diff_time(b1_start_time, start_time);
+   fcps = (float)files_created / (float)elapsed;
+   fcpsmt = (float)(files_created - simultaneous) / (float)t_elapsed;
+   frps = (float)files_read/(float)t_elapsed;
+   faps = (float)files_appended/(float)t_elapsed;
+   fdps = (float)files_deleted / (float)elapsed;
+   interval_end = diff_time(end_time,t_end_time)-diff_time(b2_end_time,b2_start_time);
+   fdaps = (float)deleted / (float)interval_end;
+   fdamt = files_deleted - deleted;
+   fdapsmt = (float)fdamt / (float)t_elapsed;
+   
+   brps = (float)bytes_read / (float) elapsed;
+   bwps = (float)bytes_written / (float) elapsed;
+   
+   MPI_Reduce(&elapsed, &elapsed_sum, 1, MPI_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&t_elapsed, &t_elapsed_sum, 1, MPI_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&elapsed, &elapsed_max, 1, MPI_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&t_elapsed, &t_elapsed_max, 1, MPI_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&elapsed, &elapsed_min, 1, MPI_LONG, MPI_MIN, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&t_elapsed, &t_elapsed_min, 1, MPI_LONG, MPI_MIN, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&interval_start, &interval_sum, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&interval_start, &interval_max, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&interval_start, &interval_min, 1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD);
+   
+   MPI_Reduce(&files_created, &fc_sum, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&files_created, &fc_max, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&files_created, &fc_min, 1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fcps, &fcps_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fcps, &fcps_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fcps, &fcps_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fcpsmt, &fcpsmt_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fcpsmt, &fcpsmt_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fcpsmt, &fcpsmt_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+   
+   MPI_Reduce(&files_read, &fr_sum, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&files_read, &fr_max, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&files_read, &fr_min, 1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD);   
+   MPI_Reduce(&frps, &frps_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&frps, &frps_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&frps, &frps_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);  
+   
+   MPI_Reduce(&files_appended, &fa_sum, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&files_appended, &fa_max, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&files_appended, &fa_min, 1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD); 
+   MPI_Reduce(&faps, &faps_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&faps, &faps_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&faps, &faps_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+   
+   MPI_Reduce(&files_deleted, &fd_sum, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&files_deleted, &fd_max, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&files_deleted, &fd_min, 1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdps, &fdps_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdps, &fdps_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdps, &fdps_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+   
+   MPI_Reduce(&deleted, &fda_sum, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&deleted, &fda_max, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&deleted, &fda_min, 1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD);   
+   MPI_Reduce(&fdaps, &fdaps_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdaps, &fdaps_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdaps, &fdaps_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);      
+   MPI_Reduce(&fdamt, &fdamt_sum, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdamt, &fdamt_max, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdamt, &fdamt_min, 1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdapsmt, &fdapsmt_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdapsmt, &fdapsmt_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&fdapsmt, &fdapsmt_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+         
+   MPI_Reduce(&bytes_read, &br_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&bytes_read, &br_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&bytes_read, &br_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&brps, &brps_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&brps, &brps_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&brps, &brps_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+   
+   MPI_Reduce(&bytes_written, &bw_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&bytes_written, &bw_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&bytes_written, &bw_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&bwps, &bwps_sum, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&bwps, &bwps_max, 1, MPI_FLOAT, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&bwps, &bwps_min, 1, MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+             
+   if ( thread_id == 0 ) {
+   
+      elapsed = elapsed_sum / threadcount;
+      t_elapsed = t_elapsed_sum / threadcount;
+   
+      fprintf(fp,"\nCluster Postmark Report\n\nNumber of Clients: %d\n\n", threadcount );
+
+      fprintf(fp,"Time:\n");
+      fprintf(fp,"\tPer Client:: total length (seconds): avg: %ld    min: %ld    max: %ld\n",elapsed, elapsed_min, elapsed_max);
+      fprintf(fp,"\tPer Client:: transactions length (seconds): avg: %ld   min: %ld   max: %ld\n", t_elapsed, t_elapsed_min, t_elapsed_max); 
+      fprintf(fp,"\tPer Client:: transactions / second: avg: %.2f   min: %.2f   max: %.2f\n", (double)transactions/(double)t_elapsed,
+      ((double)transactions)/(double)t_elapsed_max, ((double)transactions)/(double)t_elapsed_min);
+      
+      fprintf(fp,"\tAggregate :: transactions / second: %.2f \n", ((double)(transactions * threadcount))/(double)t_elapsed );
+
+      files_created = fc_sum / threadcount;
+      interval_start = interval_sum / threadcount;
+      fcps = fcps_sum / (float)threadcount;
+      fcpsmt = fcps_sum / (float)threadcount;
+      
+      fprintf(fp,"\nFiles:\n");
+      fprintf(fp,"\tPer Client:: total created: avg: %d   min:  %d   max: %d\n",files_created, fc_min, fc_max);
+      fprintf(fp,"\tPer Client:: created per second: avg: %.2f   min:  %.2f   max: %.2f\n",fcps, fcps_min, fcps_max);     
+      fprintf(fp,"\t\tPer Client:: Creation alone (files): %d\n", simultaneous);
+      fprintf(fp,"\t\tPer Client:: Creation alone (files/s): avg: %d   min: %d   max: %d\n",
+         simultaneous/interval_start, simultaneous/interval_max, simultaneous/interval_min);	 
+      fprintf(fp,"\t\tPer Client:: Mixed with transactions (files): avg: %d   min: %d   max: %d\n", files_created - simultaneous, fc_min -
+      simultaneous, fc_max - simultaneous);	 
+      fprintf(fp,"\t\tPer Client:: Mixed with transactions (files/s): avg: %.2f   min: %.2f   max: %.2f\n",
+         fcpsmt, fcpsmt_min, fcpsmt_max);
+
+      files_read = fr_sum / threadcount;
+      frps = frps_sum /(float) threadcount;
+      fprintf(fp,"\tPer Client:: read (files): avg: %d   min: %d   max: %d\n", files_read, fr_min, fr_max);
+      fprintf(fp,"\tPer Client:: read (files/s): avg: %.2f   min: %.2f   max: %.2f\n", frps, frps_min, frps_max);
+
+      files_appended = fa_sum / threadcount;
+      faps = faps_sum /(float) threadcount;
+      fprintf(fp,"\tPer Client:: appended (files): avg: %d   min: %d   max: %d\n",files_appended, fa_min, fa_max);
+      fprintf(fp,"\tPer Client:: appended (files/s): avg: %.2f   min: %.2f   max: %.2f\n",faps, faps_min, faps_max);
+
+      files_deleted = fd_sum / threadcount;
+      fdps = fdps_sum /(float) threadcount;
+      fprintf(fp,"\tPer Client:: deleted (files): avg: %d   min: %d   max: %d\n",files_deleted, fd_min, fd_max);
+      fprintf(fp,"\tPer Client:: deleted (files/s): avg: %.2f   min: %.2f   max: %.2f\n",fdps, fdps_min, fdps_max);
+
+      fda = fda_sum / threadcount;
+      fdaps = fdaps_sum /(float) threadcount;
+      fdamt = fdamt_sum / threadcount;
+      fdapsmt = fdapsmt_sum /(float) threadcount;
+      	    
+      fprintf(fp,"\t\tPer Client:: Deletion alone (files): avg: %d   min: %d   max: %d\n",fda, fda_min, fda_max);
+      fprintf(fp,"\t\tPer Client:: Deletion alone (files/s): avg: %.2f   min: %.2f   max: %.2f\n",fdaps, fdaps_min, fdaps_max);
+      fprintf(fp,"\t\tPer Client:: Mixed with transactions (files): avg: %d   min: %d   max: %d\n", fdamt, fdamt_min, fdamt_max);
+      fprintf(fp,"\t\tPer Client:: Mixed with transactions (files/s): avg: %.2f   min: %.2f   max: %.2f\n", fdapsmt, fdapsmt_min, fdapsmt_max);     
+
+      fprintf(fp,"\tAggregate :: Total files created: %d \n", fc_sum );
+      fprintf(fp,"\tAggregate :: Files created per second:  %.2f\n", fcps_sum );     
+      fprintf(fp,"\tAggregate :: Files read (files): %d, Rate (files/s): %.2f \n", fr_sum, frps_sum );
+      fprintf(fp,"\tAggregate :: Files appended (files): %d, Rate (files/s): %.2f \n", fa_sum, faps_sum );
+      fprintf(fp,"\tAggregate :: Files deleted (files): %d, Rate (files/s): %.2f \n", fd_sum, fdps_sum );
+
+      bytes_read = br_sum / (float) threadcount;
+      bytes_written = bw_sum / (float) threadcount;
+      brps = brps_sum / (float) threadcount;
+      bwps = bwps_sum / (float) threadcount;      
+
+      fprintf(fp,"\nData:\n");
+      fprintf(fp,"\tPer Client:: read (bytes): avg: %s   min: %s   max: %s\n",scalef(bytes_read), scalef(br_min), scalef(br_max));
+      fprintf(fp,"\tPer Client:: read (KBps) : avg: %.2f min: %.2f   max: %.2f\n", brps / 1024.0, brps_min / 1024.0, brps_max / 1024.0 );
+      fprintf(fp,"\tPer Client:: written (bytes): avg: %s   min: %s   max: %s\n",scalef(bytes_written), scalef(bw_min), scalef(bw_max));
+      fprintf(fp,"\tPer Client:: written (KBps) : avg: %.2f min: %.2f   max: %.2f\n", bwps / 1024.0, bwps_min / 1024.0, bwps_max / 1024.0);      
+   
+      fprintf(fp,"\tAggregate :: Read    (bytes): %s, Throughput (KBps): %.2f\n", scalef(br_sum), brps_sum / 1024.0 );
+      fprintf(fp,"\tAggregate :: Written (bytes): %s, Throughput (KBps): %.2f\n", scalef(bw_sum), bwps_sum / 1024.0 );
+   }
+}
+
+/* prints out results from running transactions */
+void verbose_report(fp,end_time,start_time,t_end_time,t_start_time,
+                    b1_end_time,b1_start_time,b2_end_time,b2_start_time,
+                    deleted)
 FILE *fp;
 time_t end_time,start_time,t_end_time,t_start_time; /* timers from run */
 int deleted; /* files deleted back-to-back */
@@ -629,7 +845,9 @@ int deleted; /* files deleted back-to-back */
    fprintf(fp,"(%s per second)\n",scalef(bytes_written/(float)elapsed));
 }
 
-void terse_report(fp,end_time,start_time,t_end_time,t_start_time,deleted)
+void terse_report(fp,end_time,start_time,t_end_time,t_start_time,
+                  b1_end_time,b1_start_time,b2_end_time,b2_start_time,
+                  deleted)
 FILE *fp;
 time_t end_time,start_time,t_end_time,t_start_time; /* timers from run */
 int deleted; /* files deleted back-to-back */
@@ -918,7 +1136,7 @@ int subdirs;
       for (i=0; i<subdirs; i++)
          {
          sprintf(dir_name,"%ss%d",save_dir,i);
-         MKDIR(dir_name); 
+         io_callbacks[io_interface].mkdir(dir_name); 
          }
       }
 }
@@ -947,7 +1165,7 @@ int subdirs;
       for (i=0; i<subdirs; i++)
          {
          sprintf(dir_name,"%ss%d",save_dir,i);
-         rmdir(dir_name); 
+         io_callbacks[io_interface].rmdir(dir_name); 
          }
       }
 }
@@ -957,6 +1175,7 @@ int cli_run(param) /* none */
 char *param; /* unused */
 {
    time_t start_time,t_start_time,t_end_time,end_time; /* elapsed timers */
+   time_t b1_end_time,b1_start_time, b2_end_time,b2_start_time; 
    int delete_base; /* snapshot of deleted files counter */
    FILE *fp=NULL; /* file descriptor for directing output */
    int incomplete;
@@ -991,6 +1210,7 @@ char *param; /* unused */
       printf("Done\n");
       }
 
+   MPI_Barrier(MPI_COMM_WORLD);
    time(&start_time); /* store start time */
 
    /* create files in specified directory until simultaneous number */
@@ -1000,13 +1220,41 @@ char *param; /* unused */
       create_file(0);
    printf("Done\n");
   
-   printf("Performing transactions");
+   time(&b1_start_time); /* get the time we waited on the barrier... (WILL BE DEDUCTED FROM THE TOTAL RUN TIME...) */
+
+/*____________________________________________________________________________________________________*/
+//   printf("Process %d >> Waiting on Barrier for other nodes...", thread_id );
+   if ( thread_id == 0 )
+	   printf("Master Process >> Waiting on Barrier for other nodes...\n");
+   MPI_Barrier(MPI_COMM_WORLD);
+   if ( thread_id == 0 )
+	   printf("Master Process >> OK, all nodes synced...\n");
+/*____________________________________________________________________________________________________*/
+   
+//   printf("Process %d >> Performing transactions\n", thread_id );
+   if ( thread_id == 0 )
+	   printf("Master Process >> All Process starting transactions\n");
    fflush(stdout);
+
+   time(&b1_end_time);
    time(&t_start_time);
    incomplete=run_transactions(0);
    time(&t_end_time);
+   time(&b2_start_time); /* get the time we waited on the barrier... (WILL BE DEDUCTED FROM THE TOTAL TIME...) */
+
    if (!incomplete)
-      printf("Done\n");
+	   printf("Process %d >> Done with transactions (NO ERRORS)\n", thread_id );
+   else
+	   printf("Process %d >> Done with ERRORS in transactions\n", thread_id );
+
+/*____________________________________________________________________________________________________*/
+//   printf("Process %d >> Waiting on Barrier for other nodes...", thread_id );
+   MPI_Barrier(MPI_COMM_WORLD);
+   if ( thread_id == 0 )
+	   printf("Master Process >> OK, all nodes synced after transactions...\n");
+   fflush(stdout);
+/*____________________________________________________________________________________________________*/
+   time(&b2_end_time);
 
    /* delete remaining files */
    printf("Deleting files...");
@@ -1041,13 +1289,16 @@ char *param; /* unused */
    if (!fp)
       fp=stdout;
 
+   MPI_Barrier(MPI_COMM_WORLD);
    if (!incomplete)
       reports[report](fp,end_time,start_time,t_end_time,t_start_time,
-         files_deleted-delete_base);
+                      b1_end_time,b1_start_time,b2_end_time,b2_start_time,
+                      files_deleted-delete_base);
 
    if (param && fp!=stdout)
       fclose(fp);
 
+   delete_locations();
    /* free resources allocated for this run */
    free(file_table);
    free(read_buffer);
@@ -1228,10 +1479,15 @@ char *argv[];
 {
    char buffer[MAX_LINE+1]; /* storage for input command line */
 
+   MPI_Init(&argc,&argv);
+   MPI_Comm_size(MPI_COMM_WORLD, &threadcount);
+   MPI_Comm_rank(MPI_COMM_WORLD, &thread_id);
+
    printf("PostMark v1.5 : 3/27/01\n");
    if (read_config_file((argc==2)?argv[1]:".pmrc",buffer))
       while (cli_read_line(buffer,MAX_LINE) && cli_parse_line(buffer))
          ;
+   MPI_Finalize();
 }
 
 /*

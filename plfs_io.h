@@ -17,6 +17,7 @@ int PLFS_write(void *fd, void *buf, off_t offset, size_t len) {
 }
 
 int PLFS_close(void **fd) {
+    plfs_sync((Plfs_fd *)*fd);
     plfs_close((Plfs_fd *)*fd, getpid(), 0, O_CREAT | O_RDWR, NULL);
     *fd = NULL;
     return 0;
@@ -24,4 +25,12 @@ int PLFS_close(void **fd) {
 
 int PLFS_remove(const char *filename) {
     return plfs_unlink(filename);
+}
+
+int PLFS_mkdir(const char *dirname) {
+    return plfs_mkdir(dirname, 0700);
+}
+
+int PLFS_rmdir(const char *dirname) {
+    return plfs_rmdir(dirname);
 }
