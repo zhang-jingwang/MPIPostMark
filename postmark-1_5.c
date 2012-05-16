@@ -53,9 +53,11 @@ Versions:
 #include <stdlib.h>
 #include <time.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <errno.h>
 #include "posix_io.h"
 #include "plfs_io.h"
+#include "libc_io.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -65,9 +67,8 @@ Versions:
 #define MKDIR(x) mkdir(x)
 #define SEPARATOR "\\"
 #else
-extern char *getwd();
 
-#define GETWD(x) getwd(x)
+#define GETWD(x) getcwd(x, MAX_LINE)
 #define MKDIR(x) mkdir(x,0700)
 #define SEPARATOR "/"
 #endif
@@ -209,7 +210,7 @@ struct IO_Callback {
         [IO_INTERF_##name].remove = name##_remove,
 
 struct IO_Callback io_callbacks[IO_INTERF_COUNT] = {
-    /*    INITIALIZE_IO_INTERFACE_CALLBACKS(LIBC) */
+    INITIALIZE_IO_INTERFACE_CALLBACKS(LIBC)
     INITIALIZE_IO_INTERFACE_CALLBACKS(POSIX)
     INITIALIZE_IO_INTERFACE_CALLBACKS(PLFS)
 };
