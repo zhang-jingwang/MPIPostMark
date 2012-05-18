@@ -59,6 +59,7 @@ Versions:
 #include "posix_io.h"
 #include "plfs_io.h"
 #include "libc_io.h"
+#include "mpi_io.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -226,6 +227,7 @@ struct IO_Callback io_callbacks[IO_INTERF_COUNT] = {
     INITIALIZE_IO_INTERFACE_CALLBACKS(LIBC)
     INITIALIZE_IO_INTERFACE_CALLBACKS(POSIX)
     INITIALIZE_IO_INTERFACE_CALLBACKS(PLFS)
+    INITIALIZE_IO_INTERFACE_CALLBACKS(MPI)
 };
 
 /* converts integer values to byte/kilobyte/megabyte strings */
@@ -544,6 +546,9 @@ char *param; /* remainder of command line */
         CHECK_FOR_INTERFACE(LIBC);
         CHECK_FOR_INTERFACE(POSIX);
         CHECK_FOR_INTERFACE(PLFS);
+        CHECK_FOR_INTERFACE(MPI);
+        fprintf(stderr,"Error: unrecognized io interface (%s) specified\n");
+        return(1);
     }
     fprintf(stderr,"Error: no io interface (LIBC, POSIX...) specified\n");
     return(1);
