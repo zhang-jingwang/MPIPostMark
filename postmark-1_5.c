@@ -46,6 +46,16 @@ Versions:
       it retains much of the performance of the previous implementation. 
       URL: http://www.math.keio.ac.jp/~matumoto/emt.html
       Also changed MB definition to 1024KB, tweaked show command
+
+Cluster Version of Postmark v.1.0 - May 2006
+      Modifications by Renaud Lachaize (renaud.lachaize@inrialpes.fr)
+	  and Michail Flouris (flouris@ics.forth.gr). Internal use at ICS-FORTH.
+
+1.2 - Wrote brief documentation, cleaned up the code and released it (June 2008).
+
+Add support to benchmark the PLFS and MPI File IO interface - May 2012
+      Modifications by Zhang Jingwang (jingwang.zhang@emc.com).
+
 */
 
 #include <stdio.h>
