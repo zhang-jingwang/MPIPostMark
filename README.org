@@ -1,0 +1,61 @@
+* Cluster Postmark with MPI-IO and PLFS support
+** Introduction
+   Renaud Lachaize and Michail Flouris have modified the well-known
+   Postmark v1.5 filesystem benchmark to run on a cluster using MPI,
+   in order to measure cluster/parallel filesystem performance.
+   However it only supports POSIX file API which is not the only
+   option in HPC. So I extended the tool to support MPI-IO and
+   PLFS IO interface so that we can measure the IO performance for
+   different IO interfaces.
+
+   [[https://github.com/plfs/plfs-core][PLFS]] is a checkpoint filesystem for parallel applications.
+** Dependence and Install Instructions
+*** Dependence
+    - MPI
+    - PLFS
+*** Install Instruction
+    cd /path/to/source/
+    make
+** Configuration and Execution
+   It is mostly the same as Postmark. There is an example of configure
+   file in the source tree. Here is a brief introduction to the commands:
+
+   set size - Sets low and high bounds of files
+   set number - Sets number of simultaneous files
+   set seed - Sets seed for random number generator
+   set transactions - Sets number of transactions
+   set location - Sets location of working files
+   set read - Sets read block size
+   set write - Sets write block size
+   set buffering - Sets usage of buffered I/O
+   set bias read - Sets the chance of choosing read over append
+   set bias create - Sets the chance of choosing create over delete
+   run - Runs one iteration of benchmark
+   show - Displays current configuration
+   help - Prints out available commands
+   quit - Exit program
+
+   You should pay attention to three command lines in the configuration
+   file for postmark:
+   - set iointerface POSIX (It means that POSIX file functions will be
+     used to do IOs. You could also choose LIBC, PLFS or MPI) NOTE: This
+     MUST appear in the first line.
+   - set partition prefix (It means every process will create files
+     with its rank number as prefix, for example, rank 0 will create files
+     as r0-xxxx and rank 1 creates r1-xxxx. The other possible value is
+     "subdir" which means that every process creates a sub directory such
+     as Rank-0, Rank-1 and creates all its test files in it.)
+   - set report cluster (It means that rank 0 will collect all timing
+     information from all of the processes and print the aggregated result
+     out.)  Other commands have just the same meaning as the original
+     postmark.
+
+   You could run the benchmark using the following command:
+       mpirun -np N ./postmark ./simple.conf
+** Results
+   Only the transaction per second is meaningful, others are misleading.
+
+** References
+   [[https://communities.netapp.com/servlet/JiveServlet/download/2609-1551/Katcher97-postmark-netapp-tr3022.pdf][PostMark: A New File System Benchmark]]
+   [[http://michail.flouris.net/2008/06/parallel-postmark-benchmark/][Parallel Postmark Benchmark]]
+   [[https://github.com/plfs/plfs-core][PLFS: A Checkpoint Filesystem for Parallel Applications]]
