@@ -14,10 +14,10 @@
     - MPI
     - PLFS
 *** Install Instruction
-#+BEGIN_QUOTE
+#+BEGIN_EXAMPLE
     cd /path/to/source/
     make
-#+END_QUOTE
+#+END_EXAMPLE
 ** Configuration and Execution
    It is mostly the same as Postmark. There is an example of configure
    file in the source tree. Here is a brief introduction to the commands:
@@ -55,7 +55,9 @@
      postmark.
 
    You could run the benchmark using the following command:
-       mpirun -np N ./postmark ./simple.conf
+#+BEGIN_CENTER
+       *mpirun -np N ./postmark ./simple.conf*
+#+END_CENTER
 ** Results
    Only the transaction per second is meaningful, others are misleading.
 
