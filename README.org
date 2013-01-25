@@ -14,12 +14,15 @@
     - MPI
     - PLFS
 *** Install Instruction
+#+BEGIN_QUOTE
     cd /path/to/source/
     make
+#+END_QUOTE
 ** Configuration and Execution
    It is mostly the same as Postmark. There is an example of configure
    file in the source tree. Here is a brief introduction to the commands:
 
+#+BEGIN_EXAMPLE
    set size - Sets low and high bounds of files
    set number - Sets number of simultaneous files
    set seed - Sets seed for random number generator
@@ -34,6 +37,7 @@
    show - Displays current configuration
    help - Prints out available commands
    quit - Exit program
+#+END_EXAMPLE
 
    You should pay attention to three command lines in the configuration
    file for postmark:
@@ -56,6 +60,6 @@
    Only the transaction per second is meaningful, others are misleading.
 
 ** References
-   [[https://communities.netapp.com/servlet/JiveServlet/download/2609-1551/Katcher97-postmark-netapp-tr3022.pdf][PostMark: A New File System Benchmark]]
-   [[http://michail.flouris.net/2008/06/parallel-postmark-benchmark/][Parallel Postmark Benchmark]]
-   [[https://github.com/plfs/plfs-core][PLFS: A Checkpoint Filesystem for Parallel Applications]]
+  - [[https://communities.netapp.com/servlet/JiveServlet/download/2609-1551/Katcher97-postmark-netapp-tr3022.pdf][PostMark: A New File System Benchmark]]
+  - [[http://michail.flouris.net/2008/06/parallel-postmark-benchmark/][Parallel Postmark Benchmark]]
+  - [[https://github.com/plfs/plfs-core][PLFS: A Checkpoint Filesystem for Parallel Applications]]
