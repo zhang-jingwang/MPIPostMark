@@ -19,7 +19,7 @@
     make
 #+END_EXAMPLE
 ** Configuration and Execution
-   It is mostly the same as Postmark. There is an example of configure
+   It is mostly the same as Postmark, and for the users who are not familiar with Postmark, please refer to the first document in references <<PostMark: A New File System Benchmark>>. There is an example of configure
    file in the source tree. Here is a brief introduction to the commands:
 
 #+BEGIN_EXAMPLE
