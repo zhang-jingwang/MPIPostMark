@@ -7,23 +7,40 @@
 #include <plfs.h>
 
 int PLFS_open(void **fd, const char *filename, int flags) {
-    return plfs_open((Plfs_fd **)fd, filename, flags, getpid(), 0644, NULL);
+    plfs_error_t rv;
+    rv = plfs_open((Plfs_fd **)fd, filename, flags, getpid(), 0644, NULL);
+    return(plfs_error_to_errno(rv));
 }
 
 int PLFS_read(void *fd, void *buf, off_t offset, size_t len) {
-    return plfs_read(fd, buf, len, offset);
+    ssize_t got;
+    plfs_error_t rv;
+    got = 0;
+    rv = plfs_read(fd, buf, len, offset, &got);
+    if (rv == PLFS_SUCCESS) {
+        return(got);
+    }
+    return(plfs_error_to_errno(rv));
 }
 
 int PLFS_write(void *fd, void *buf, off_t offset, size_t len) {
+    plfs_error_t rv;
+    ssize_t did;
     pid_t pid = getpid();
-    return plfs_write(fd, buf, len, offset, pid);
+    did = 0;
+    rv = plfs_write(fd, buf, len, offset, pid, &did);
+    if (rv == PLFS_SUCCESS) {
+        return(did);
+    }
+    return(plfs_error_to_errno(rv));
 }
 
 int PLFS_close(void **fd) {
-    int ret;
+    int refs;
     //    ret = plfs_sync((Plfs_fd *)*fd);
     //    if (ret) printf("Sync error! %s.", strerror(errno));
-    plfs_close((Plfs_fd *)*fd, getpid(), 0, O_CREAT | O_RDWR, NULL);
+    (void)plfs_close((Plfs_fd *)*fd, getpid(), 0, 
+                     O_CREAT | O_RDWR, NULL, &refs);
     *fd = NULL;
     return 0;
 }
